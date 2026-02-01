@@ -1,21 +1,24 @@
 import os
 import asyncio
+import subprocess
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from utils.player import MusicQueue
-from utils.ffmpeg_utils import stream_audio
-from config import BOT_TOKEN, API_ID, API_HASH, DOWNLOAD_PATH, MONGO_URI
 from pymongo import MongoClient
 import yt_dlp
+from collections import deque
 
-# Ensure downloads folder exists
+# --- Config ---
+from config import BOT_TOKEN, API_ID, API_HASH, DOWNLOAD_PATH, MONGO_URI, FFMPEG_BIN
+
 os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 
 app = Client("musicbot", bot_token=BOT_TOKEN, api_id=API_ID, api_hash=API_HASH)
-music_queue = MusicQueue()
+
+# --- Queue system ---
+music_queue = deque()
 vc_process = None
 
-# MongoDB setup
+# --- MongoDB ---
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["musicbot"]
 queue_collection = db["queue"]
@@ -28,20 +31,22 @@ async def download_song(url: str):
         file_path = ydl.prepare_filename(info)
         return file_path, info.get("title", "Unknown")
 
+def stream_audio(file_path):
+    cmd = [FFMPEG_BIN, "-re", "-i", file_path, "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"]
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE)
+
 async def play_next(message: Message):
     global vc_process
-    if music_queue.is_empty():
+    if not music_queue:
         await message.reply_text("Queue finished!")
         return
-    song = music_queue.pop()
+    song = music_queue.popleft()
     file_path, title = await download_song(song)
     vc_process = stream_audio(file_path)
     await message.reply_text(f"Now playing: {title}")
-    # Wait until song finishes
-    await asyncio.sleep(1)  # small delay to start streaming
+    await asyncio.sleep(1)
     while vc_process.poll() is None:
         await asyncio.sleep(1)
-    # Play next
     await play_next(message)
 
 # --- Bot commands ---
@@ -62,14 +67,12 @@ async def start(client, message):
 async def add_song(client, query):
     await query.answer("Send me a YouTube link now!")
 
-    # Wait for next message from the same user
     @app.on_message(filters.private & filters.user(query.from_user.id))
     async def get_link(_, message):
         url = message.text.strip()
-        music_queue.add(url)
+        music_queue.append(url)
         queue_collection.insert_one({"song": url})
         await message.reply_text(f"Added to queue: {url}")
-        # If nothing is playing, start
         if vc_process is None or vc_process.poll() is not None:
             await play_next(message)
         app.remove_handler(get_link)
@@ -84,5 +87,5 @@ async def stop_music(client, query):
         await query.message.reply_text("Stopped playback and cleared queue!")
     await query.answer()
 
-# Run the bot
+# --- Run bot ---
 app.run()
