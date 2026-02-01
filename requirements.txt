@@ -1,8 +1,10 @@
 pyrogram==2.0.106
 tgcrypto==1.2.5
-pytgcalls==3.0.0.dev6
-tgcalls==3.0.0.dev2
 yt-dlp==2026.1.31
 pymongo==4.16.0
 pillow==12.1.0
 requests==2.32.5
+
+# Install PyTgCalls and tgcalls from prebuilt wheels
+https://github.com/pytgcalls/pytgcalls/releases/download/v2.2.9.2/py_tgcalls-2.2.9.2-py3-none-any.whl
+https://github.com/pytgcalls/pytgcalls/releases/download/v2.2.9.2/tgcalls-2.2.9.2-cp311-cp311-manylinux_2_28_x86_64.whl
