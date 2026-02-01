@@ -1,103 +1,61 @@
 import os, asyncio
+import os
 from pyrogram import Client, filters
-from pyrogram.types import CallbackQuery
-from pytgcalls import PyTgCalls
-from pytgcalls.types.input_stream import AudioPiped, InputStream
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from utils.player import MusicQueue
+from utils.ffmpeg_utils import stream_audio
+from config import BOT_TOKEN, API_ID, API_HASH
 
-from config import *
-from yt import search, download
-from autoplay import recommend
-from image import generate_thumbnail
-from lyrics import get_lyrics
-from radio import get_radio
-from queue import add, pop, get, clear
-from buttons import controls, search_buttons
-from database import chats, history
-from stats import add_play
-from cleanup import cleanup
+app = Client("musicbot", bot_token=BOT_TOKEN, api_id=API_ID, api_hash=API_HASH)
 
-app = Client("musicbot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-vc = PyTgCalls(app)
+music_queue = MusicQueue()
+vc_process = None  # current FFmpeg process
 
-@app.on_message(filters.command("play") & filters.group)
-async def play(_, m):
-    q = " ".join(m.command[1:])
-    if not q:
-        return await m.reply("Give song name")
-    res = search(q)
-    await m.reply("Choose:", reply_markup=search_buttons(res))
-
-@app.on_callback_query(filters.regex("^play_"))
-async def play_cb(_, cb: CallbackQuery):
-    url = cb.data.split("_", 1)[1]
-    chat = cb.message.chat.id
-
-    data = download(url)
-    history.insert_one({"chat": chat, "title": data["title"]})
-    add_play()
-    cleanup()
-
-    if vc.active_calls.get(chat):
-        add(chat, data)
-        return await cb.answer("Queued")
-
-    chats.update_one({"_id": chat}, {"$set": {"volume": DEFAULT_VOLUME}}, upsert=True)
-    await vc.join_group_call(chat, InputStream(AudioPiped(data["file"])))
-    await vc.change_volume_call(chat, DEFAULT_VOLUME)
-
-    thumb = generate_thumbnail(data["thumb"])
-    await cb.message.delete()
-    await app.send_photo(
-        chat,
-        photo=thumb,
-        caption=f"🎵 {data['title']}",
-        reply_markup=controls()
+# Start command
+@app.on_message(filters.command("start"))
+async def start(client, message):
+    buttons = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🎵 Add Song", callback_data="add_song")]]
+    )
+    await message.reply_text(
+        "Hello! I am your free Telegram VC Music Bot.\nUse buttons to control music.",
+        reply_markup=buttons
     )
 
-@vc.on_stream_end()
-async def next(_, u):
-    chat = u.chat_id
-    song = pop(chat)
-    if song:
-        await vc.change_stream(chat, InputStream(AudioPiped(song["file"])))
+# Add a song to queue
+@app.on_callback_query(filters.regex("add_song"))
+async def add_song(client, query):
+    await query.answer("Send me a YouTube link!")
+    # Next message from user should contain the link
+    # For simplicity, we can use a temporary message handler
+    # (In production, track per-user state)
+
+# Play command (manual)
+@app.on_message(filters.command("play"))
+async def play(client, message):
+    global vc_process
+    if music_queue.is_empty():
+        await message.reply_text("Queue is empty!")
         return
-    if AUTOPLAY:
-        last = history.find_one({"chat": chat}, sort=[("_id", -1)])
-        if last:
-            url = recommend(last["title"])
-            if url:
-                data = download(url)
-                await vc.change_stream(chat, InputStream(AudioPiped(data["file"])))
-                return
-    await vc.leave_group_call(chat)
+    song = music_queue.pop()
+    # Download via yt-dlp
+    import yt_dlp
+    ydl_opts = {"outtmpl": "downloads/%(title)s.%(ext)s", "format": "bestaudio"}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(song, download=True)
+        file_path = ydl.prepare_filename(info)
+    # Stream to VC
+    vc_process = stream_audio(file_path, chat_id=None)  # VC joining logic later
+    await message.reply_text(f"Now playing: {info['title']}")
 
-@app.on_callback_query()
-async def controls_cb(_, cb: CallbackQuery):
-    chat = cb.message.chat.id
-    if cb.data == "pause":
-        await vc.pause_stream(chat)
-    elif cb.data == "resume":
-        await vc.resume_stream(chat)
-    elif cb.data == "skip":
-        song = pop(chat)
-        if song:
-            await vc.change_stream(chat, InputStream(AudioPiped(song["file"])))
-        else:
-            await vc.leave_group_call(chat)
-    elif cb.data == "stop":
-        clear(chat)
-        await vc.leave_group_call(chat)
-        await cb.message.edit("Stopped")
-    elif cb.data == "lyrics":
-        last = history.find_one({"chat": chat}, sort=[("_id", -1)])
-        await cb.answer(get_lyrics(last["title"])[:4000], show_alert=True)
-    elif cb.data == "radio":
-        q = get_radio("lofi")
-        r = search(q, 1)[0]
-        data = download(r["webpage_url"])
-        await vc.change_stream(chat, InputStream(AudioPiped(data["file"])))
-    elif cb.data == "queue":
-        await cb.answer("\n".join(x["title"] for x in get(chat)) or "Empty", show_alert=True)
+# Stop command
+@app.on_message(filters.command("stop"))
+async def stop(client, message):
+    global vc_process
+    if vc_process:
+        vc_process.terminate()
+        vc_process = None
+        await message.reply_text("Stopped playback!")
 
-vc.start()
+# Run bot
 app.run()
